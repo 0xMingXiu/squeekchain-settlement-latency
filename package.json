@@ -1,0 +1,19 @@
+{
+  "name": "squeek-settlement-latency",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Read-only Squeekchain (Sepolia) settlement latency tracker: replays BatchSettled, measures round-close -> settlement delay, writes alert CSVs, serves a tiny local dashboard.",
+  "license": "MIT",
+  "scripts": {
+    "gen:abi": "node scripts/gen-abis.mjs",
+    "verify": "./env.sh tsx verify.ts",
+    "verify:strict": "SQUEEK_STRICT=1 ./env.sh tsx verify.ts",
+    "track": "./env.sh tsx track.ts",
+    "serve": "./env.sh tsx web/server.ts",
+    "test": "tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": { "viem": "^2.21.0" },
+  "devDependencies": { "tsx": "^4.19.0", "typescript": "^5.6.0", "@types/node": "^20.0.0" }
+}

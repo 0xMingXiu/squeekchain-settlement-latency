@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Squeek Settlement Latency · Sepolia</title>
+<style>
+  :root{--bg:#0f1115;--card:#171a21;--line:#262b36;--fg:#e7e9ee;--mut:#8b93a7;--ok:#3ecf8e;--warn:#f5b84d;--crit:#ff5d5d;--info:#6aa9ff}
+  *{box-sizing:border-box}body{margin:0;font:14px/1.45 ui-sans-serif,system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--fg)}
+  main{max-width:1100px;margin:0 auto;padding:24px 16px 48px}h1{font-size:20px;margin:0 0 4px}.sub{color:var(--mut);margin-bottom:18px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:16px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+  .k{color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.04em}.v{font-size:22px;font-weight:650;margin-top:2px}.s{color:var(--mut);font-size:12px}
+  .banner{border-radius:10px;padding:12px 14px;margin-bottom:16px;font-weight:600}
+  .b-ok{background:#123326;color:var(--ok)}.b-warn{background:#3a2c10;color:var(--warn)}.b-crit{background:#3a1515;color:var(--crit)}
+  h2{font-size:15px;margin:22px 0 8px}svg{width:100%;height:260px;display:block}
+  table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--mut);font-weight:500}.sev{font-weight:700}.CRIT{color:var(--crit)}.WARN{color:var(--warn)}.INFO{color:var(--info)}.OK{color:var(--ok)}
+  a{color:var(--info)}code{font-size:12px;color:var(--mut)}.dl a{margin-right:12px}
+</style></head>
+<body><main>
+<h1>🐹 Squeek Settlement Latency Tracker</h1>
+<div class="sub">How long does each closed Squeekchain round wait before a Reporter-signed <code>BatchSettled</code> certifies it on Sepolia? Read-only replay of SqueekCore + SqueekMining at one pinned finalized block.</div>
+<div id="status" class="card">Replaying settlement history… (first load can take ~2 min on a cold cache)</div>
+<div id="app" hidden>
+  <div id="banner" class="banner"></div>
+  <div class="grid" id="kpis"></div>
+  <h2>Settlement latency per batch <span class="s">(oldest round in batch, log scale · dashed = WARN / CRIT thresholds)</span></h2>
+  <div class="card"><svg id="chart"></svg></div>
+  <h2>Alerts <span class="s dl">· download <a href="/csv/alerts.csv">alerts.csv</a><a href="/csv/batches.csv">batches.csv</a><a href="/csv/daily.csv">daily.csv</a></span></h2>
+  <div class="card"><table id="alerts"></table></div>
+  <h2>Daily (UTC)</h2>
+  <div class="card"><table id="daily"></table></div>
+  <p class="s" id="foot"></p>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+const dur = (s) => { if (s == null) return "–"; s = Number(s); const a = Math.abs(s);
+  if (a < 60) return a + "s"; if (a < 3600) return Math.floor(a/60) + "m" + String(a%60).padStart(2,"0") + "s";
+  if (a < 86400) return Math.floor(a/3600) + "h" + String(Math.floor(a%3600/60)).padStart(2,"0") + "m";
+  return Math.floor(a/86400) + "d" + String(Math.floor(a%86400/3600)).padStart(2,"0") + "h"; };
+const when = (t) => new Date(t*1000).toLocaleString(undefined, { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZoneName: "short" });
+const tx = (h) => h ? `<a target="_blank" href="https://eth-sepolia.blockscout.com/tx/${h}">${h.slice(0,10)}…</a>` : "";
+const card = (k, v, s="") => `<div class="card"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${s}</div></div>`;
+
+function chart(points, th, events) {
+  const svg = $("chart"), W = svg.clientWidth || 1000, H = 260, L = 48, R = 10, T = 10, B = 24;
+  if (!points.length) return;
+  const t0 = points[0][0], t1 = Math.max(points.at(-1)[0], ...events.map(e => e.timestamp));
+  const x = (t) => L + (t - t0) / (t1 - t0 || 1) * (W - L - R);
+  const ymax = Math.max(...points.map(p => p[1]), th.critSec) * 1.3, lg = (v) => Math.log10(Math.max(v, 10));
+  const y = (v) => T + (1 - (lg(v) - 1) / (lg(ymax) - 1)) * (H - T - B);
+  let g = "";
+  for (const v of [10, 60, 600, 3600, 21600, 86400, 604800]) if (v < ymax) g += `<line x1="${L}" x2="${W-R}" y1="${y(v)}" y2="${y(v)}" stroke="#262b36"/><text x="${L-6}" y="${y(v)+4}" fill="#8b93a7" font-size="11" text-anchor="end">${dur(v)}</text>`;
+  for (const [v, c] of [[th.warnSec, "#f5b84d"], [th.critSec, "#ff5d5d"]]) g += `<line x1="${L}" x2="${W-R}" y1="${y(v)}" y2="${y(v)}" stroke="${c}" stroke-dasharray="4 4" opacity=".7"/>`;
+  for (const e of events) g += `<line x1="${x(e.timestamp)}" x2="${x(e.timestamp)}" y1="${T}" y2="${H-B}" stroke="${e.type==='UNSETTLED_NOW'?'#ff5d5d':'#6aa9ff'}" opacity=".5"><title>${e.type}: ${e.message}</title></line>`;
+  for (const [t, v, n, b] of points) { const c = v >= th.critSec ? "#ff5d5d" : v >= th.warnSec ? "#f5b84d" : "#3ecf8e";
+    g += `<circle cx="${x(t)}" cy="${y(v)}" r="${n > 5 ? 3.5 : 2}" fill="${c}" opacity=".8"><title>${when(t)} · block ${b} · ${n} round(s) · ${dur(v)}</title></circle>`; }
+  const d0 = new Date(t0*1000), d1 = new Date(t1*1000);
+  g += `<text x="${L}" y="${H-6}" fill="#8b93a7" font-size="11">${d0.toLocaleDateString()}</text><text x="${W-R}" y="${H-6}" fill="#8b93a7" font-size="11" text-anchor="end">${d1.toLocaleDateString()}</text>`;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.innerHTML = g;
+}
+
+fetch("/api/summary").then(r => r.json()).then(d => {
+  if (!d.ok) throw new Error(d.error);
+  const n = d.now, m = d.meta, a = d.stats.allTime, l = d.stats.last24h, th = m.thresholds;
+  const level = n.oldestUnsettledWaitSec >= th.critSec ? "crit" : n.oldestUnsettledWaitSec >= th.warnSec ? "warn" : "ok";
+  $("banner").className = "banner b-" + level;
+  $("banner").textContent = level === "ok"
+    ? `✅ Settlement healthy — frontier at round ${n.frontier}, last batch ${dur(n.lastBatchAgeSec)} ago`
+    : `${level === "crit" ? "🚨" : "⚠️"} ${n.closedUnsettled} closed rounds unsettled — round ${n.frontier + 1} has waited ${dur(n.oldestUnsettledWaitSec)} (last BatchSettled ${dur(n.lastBatchAgeSec)} ago)${n.paused ? " · Core PAUSED" : ""}. Per the docs, a lagging frontier means settlement is delayed, not that work was lost.`;
+  $("kpis").innerHTML = [
+    card("Round now / frontier", `${n.currentRound} / ${n.frontier}`, `${n.closedUnsettled} closed & unsettled`),
+    card("Last BatchSettled", dur(n.lastBatchAgeSec) + " ago", `oldest unsettled waiting ${dur(n.oldestUnsettledWaitSec)}`),
+    card("Latency p50 / p90", `${dur(a.oldestLatency.p50)} / ${dur(a.oldestLatency.p90)}`, `p99 ${dur(a.oldestLatency.p99)} · max ${dur(a.oldestLatency.max)}`),
+    card("Last 24h", `${l.batches} batches`, `p90 ${dur(l.oldestLatency.p90)} · max ${dur(l.oldestLatency.max)}`),
+    card("Batches (all time)", a.batches, `${a.roundsSettled} rounds · WARN ${a.warn} · CRIT ${a.crit}`),
+    card("Mining checkpoint", `round ${n.miningProcessedThroughRound}`, `last ${dur(n.lastCheckpointAgeSec)} ago · ${d.checkpoints} checkpoints`),
+  ].join("");
+  chart(d.points, th, d.alerts.filter(x => ["PAUSED","UNPAUSED","REPORTER_ROTATED","UNSETTLED_NOW"].includes(x.type)));
+  $("alerts").innerHTML = "<tr><th>When</th><th>Sev</th><th>Type</th><th>Rounds</th><th>Detail</th><th>Tx</th></tr>" +
+    [...d.alerts].reverse().map(x => `<tr><td>${when(x.timestamp)}</td><td class="sev ${x.severity}">${x.severity}</td><td>${x.type}</td><td>${x.rounds}</td><td>${x.message}</td><td>${tx(x.txHash)}</td></tr>`).join("");
+  $("daily").innerHTML = "<tr><th>Date</th><th>Batches</th><th>Rounds</th><th>p50</th><th>p90</th><th>Max</th><th>WARN</th><th>CRIT</th></tr>" +
+    [...d.daily].reverse().map(x => `<tr><td>${x.date}</td><td>${x.batches}</td><td>${x.roundsSettled}</td><td>${dur(x.oldestLatency.p50)}</td><td>${dur(x.oldestLatency.p90)}</td><td class="${x.oldestLatency.max >= th.critSec ? "CRIT" : ""}">${dur(x.oldestLatency.max)}</td><td>${x.warn}</td><td>${x.crit}</td></tr>`).join("");
+  $("foot").innerHTML = `Verified deployment (Quickstart checks) at Sepolia block <b>${m.blockNumber}</b> (${when(m.blockTimestamp)}) via ${m.rpcHost}${m.strict ? " · strict" : ""}. SqueekCore <a target="_blank" href="https://eth-sepolia.blockscout.com/address/${m.contracts.core}">${m.contracts.core}</a> v${m.coreVersion} · SqueekMining v${m.miningVersion} · reporter ${m.reporter.current} (${m.reporter.rotations} onchain rotation(s) from docs value). Thresholds: WARN ≥ ${dur(th.warnSec)}, CRIT ≥ ${dur(th.critSec)}.`;
+  $("status").hidden = true; $("app").hidden = false;
+}).catch(e => { $("status").innerHTML = `<b class="CRIT">Error:</b> ${e.message}`; });
+</script>
+</main></body></html>
